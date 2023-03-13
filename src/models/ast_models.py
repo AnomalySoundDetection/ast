@@ -10,11 +10,12 @@ import torch.nn as nn
 from torch.cuda.amp import autocast
 import os
 import wget
-os.environ['TORCH_HOME'] = '../../pretrained_models'
+os.environ['TORCH_HOME'] = '../pretrained_models'
 import timm
 from timm.models.layers import to_2tuple,trunc_normal_
 
 # override the timm package to relax the input shape constraint.
+# TODO: Find how the path embedding work
 class PatchEmbed(nn.Module):
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
@@ -119,16 +120,17 @@ class ASTModel(nn.Module):
             if model_size != 'base384':
                 raise ValueError('currently only has base384 AudioSet pretrained model.')
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            if os.path.exists('../../pretrained_models/audioset_10_10_0.4593.pth') == False:
+            if os.path.exists('../pretrained_models/audioset_10_10_0.4593.pth') == False:
                 # this model performs 0.4593 mAP on the audioset eval set
                 audioset_mdl_url = 'https://www.dropbox.com/s/cv4knew8mvbrnvq/audioset_0.4593.pth?dl=1'
-                wget.download(audioset_mdl_url, out='../../pretrained_models/audioset_10_10_0.4593.pth')
-            sd = torch.load('../../pretrained_models/audioset_10_10_0.4593.pth', map_location=device)
+                wget.download(audioset_mdl_url, out='../pretrained_models/audioset_10_10_0.4593.pth')
+            sd = torch.load('../pretrained_models/audioset_10_10_0.4593.pth', map_location=device)
             audio_model = ASTModel(label_dim=527, fstride=10, tstride=10, input_fdim=128, input_tdim=1024, imagenet_pretrain=False, audioset_pretrain=False, model_size='base384', verbose=False)
             audio_model = torch.nn.DataParallel(audio_model)
             audio_model.load_state_dict(sd, strict=False)
             self.v = audio_model.module.v
             self.original_embedding_dim = self.v.pos_embed.shape[2]
+            print("embedding size: ", self.original_embedding_dim)
             self.mlp_head = nn.Sequential(nn.LayerNorm(self.original_embedding_dim), nn.Linear(self.original_embedding_dim, label_dim))
 
             f_dim, t_dim = self.get_shape(fstride, tstride, input_fdim, input_tdim)
@@ -170,20 +172,39 @@ class ASTModel(nn.Module):
         # expect input x = (batch_size, time_frame_num, frequency_bins), e.g., (12, 1024, 128)
         x = x.unsqueeze(1)
         x = x.transpose(2, 3)
+        #print("size of x after transpose is ", x.shape)
 
         B = x.shape[0]
         x = self.v.patch_embed(x)
+        #print("Size of x after positional encoding is ", x.shape)
+
         cls_tokens = self.v.cls_token.expand(B, -1, -1)
         dist_token = self.v.dist_token.expand(B, -1, -1)
+        
+        #print("Size of cls_tokens after expanding is ", cls_tokens.shape)
+        #print("Size of dist_tokens after expanding is ", dist_token.shape)
+
         x = torch.cat((cls_tokens, dist_token, x), dim=1)
+        #print("Size of x after concatenating is ", x.shape)
+
+        #print("Size of pos embed is ", self.v.pos_embed.shape)
         x = x + self.v.pos_embed
+        #print("Size of x after pos embedding is ", x.shape)
+
         x = self.v.pos_drop(x)
+        #print("Size of x after pos dropping is ", x.shape)
+
         for blk in self.v.blocks:
             x = blk(x)
+
+        #print("Size of x after going through all blocks in transformer is ", x.shape)
+
         x = self.v.norm(x)
         x = (x[:, 0] + x[:, 1]) / 2
+        #print("Size of x after averaging is ", x.shape)
 
         x = self.mlp_head(x)
+
         return x
 
 if __name__ == '__main__':
